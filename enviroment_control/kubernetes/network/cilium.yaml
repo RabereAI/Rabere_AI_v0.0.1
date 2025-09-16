@@ -1,0 +1,143 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cilium-config
+  namespace: kube-system
+data:
+  enable-ipv4: "true"
+  enable-ipv6: "false"
+  tunnel: "vxlan"
+  identity-allocation-mode: "crd"
+  debug: "false"
+  enable-endpoint-health-checking: "true"
+  enable-metrics: "true"
+  monitor-aggregation: "medium"
+  bpf-map-dynamic-size-ratio: "0.0025"
+  enable-bpf-clock-probe: "true"
+  preallocate-bpf-maps: "false"
+  sidecar-istio-proxy-image: "cilium/istio_proxy"
+  cluster-name: "rabere-habitat"
+  cluster-id: "1"
+  enable-l7-proxy: "true"
+  enable-ipv4-masquerade: "true"
+  enable-bpf-masquerade: "true"
+  enable-xt-socket-fallback: "true"
+  install-iptables-rules: "true"
+  auto-direct-node-routes: "true"
+  enable-local-redirect-policy: "true"
+  kube-proxy-replacement: "strict"
+  enable-host-reachable-services: "true"
+  enable-external-ips: "true"
+  enable-node-port: "true"
+  enable-health-check: "true"
+  enable-well-known-identities: "true"
+  enable-remote-node-identity: "true"
+  operator-api-serve-addr: "127.0.0.1:9234"
+  enable-hubble: "true"
+  hubble-socket-path: "/var/run/cilium/hubble.sock"
+  hubble-metrics-server: ":9091"
+  hubble-metrics:
+    enabled: "true"
+    port: 9091
+    serviceMonitor:
+      enabled: "true"
+  hubble-ui:
+    enabled: "true"
+  hubble-relay:
+    enabled: "true"
+  prometheus:
+    enabled: "true"
+    serviceMonitor:
+      enabled: "true"
+  operator:
+    enabled: "true"
+    replicas: 1
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 1000m
+        memory: 512Mi
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: cilium
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      k8s-app: cilium
+  template:
+    metadata:
+      labels:
+        k8s-app: cilium
+    spec:
+      hostNetwork: true
+      containers:
+      - name: cilium-agent
+        image: cilium/cilium:v1.9.5
+        command: ["cilium-agent"]
+        args:
+        - "--config-dir=/tmp/cilium/config-map"
+        env:
+        - name: K8S_NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: CILIUM_K8S_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        securityContext:
+          privileged: true
+        resources:
+          requests:
+            cpu: 100m
+            memory: 512Mi
+          limits:
+            cpu: 2000m
+            memory: 2Gi
+        volumeMounts:
+        - name: bpf-maps
+          mountPath: /sys/fs/bpf
+          mountPropagation: Bidirectional
+        - name: cilium-run
+          mountPath: /var/run/cilium
+        - name: cni-path
+          mountPath: /host/opt/cni/bin
+        - name: etc-cni-netd
+          mountPath: /host/etc/cni/net.d
+        - name: cilium-config-path
+          mountPath: /tmp/cilium/config-map
+          readOnly: true
+      volumes:
+      - name: bpf-maps
+        hostPath:
+          path: /sys/fs/bpf
+          type: DirectoryOrCreate
+      - name: cilium-run
+        hostPath:
+          path: /var/run/cilium
+          type: DirectoryOrCreate
+      - name: cni-path
+        hostPath:
+          path: /opt/cni/bin
+          type: DirectoryOrCreate
+      - name: etc-cni-netd
+        hostPath:
+          path: /etc/cni/net.d
+          type: DirectoryOrCreate
+      - name: cilium-config-path
+        configMap:
+          name: cilium-config
+      tolerations:
+      - operator: Exists
+      priorityClassName: system-node-critical
+      restartPolicy: Always
+      serviceAccount: cilium
+      serviceAccountName: cilium
+      terminationGracePeriodSeconds: 1
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet 

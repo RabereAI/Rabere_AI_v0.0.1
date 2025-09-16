@@ -1,0 +1,75 @@
+# Stage 1: Development dependencies
+FROM node:18-alpine AS deps
+WORKDIR /app
+COPY package*.json ./
+RUN apk add --no-cache python3 make g++ \
+    && npm ci \
+    && npm cache clean --force
+
+# Stage 2: Builder
+FROM node:18-alpine AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+RUN npm run build \
+    && npm prune --production
+
+# Stage 3: Security scanner
+FROM aquasec/trivy:latest AS security-scan
+WORKDIR /scan
+COPY --from=builder /app .
+RUN trivy filesystem --no-progress --ignore-unfixed --severity HIGH,CRITICAL .
+
+# Stage 4: Production dependencies
+FROM node:18-alpine AS production-deps
+WORKDIR /app
+COPY --from=builder /app/package*.json ./
+COPY --from=builder /app/node_modules ./node_modules
+
+# Stage 5: Runtime
+FROM node:18-alpine AS runner
+WORKDIR /app
+
+# Install additional runtime dependencies
+RUN apk add --no-cache \
+    tini \
+    curl \
+    tzdata \
+    && addgroup -g 1001 -S nodejs \
+    && adduser -S nodejs -u 1001 \
+    && mkdir -p /app/logs \
+    && chown -R nodejs:nodejs /app
+
+# Copy security configuration
+COPY --chown=nodejs:nodejs config/security/security-headers.json ./config/security/
+COPY --chown=nodejs:nodejs config/security/csp-directives.json ./config/security/
+
+# Copy application
+COPY --from=builder --chown=nodejs:nodejs /app/dist ./dist
+COPY --from=production-deps --chown=nodejs:nodejs /app/node_modules ./node_modules
+COPY --chown=nodejs:nodejs package.json ./
+
+# Configure environment
+ENV NODE_ENV=production \
+    PORT=3000 \
+    TZ=UTC
+
+# Set up health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:3000/health || exit 1
+
+# Switch to non-root user
+USER nodejs
+
+# Use tini as init
+ENTRYPOINT ["/sbin/tini", "--"]
+
+# Start application
+CMD ["node", "dist/main"]
+
+# Labels
+LABEL maintainer="AHECS Team <team@ahecs.io>" \
+      version="1.0.0" \
+      description="API Gateway for rabere Habitat Control System" \
+      org.opencontainers.image.source="https://github.com/ahecs/api-gateway" \
+      org.opencontainers.image.licenses="Proprietary" 

@@ -1,0 +1,256 @@
+version: '3.8'
+
+services:
+  api-gateway:
+    build:
+      context: ./services/api-gateway
+      dockerfile: Dockerfile.multistage
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - REDIS_URL=redis://redis-cluster
+      - KAFKA_BROKERS=kafka1:9092,kafka2:9092,kafka3:9092
+    depends_on:
+      - redis-cluster
+      - kafka1
+      - kafka2
+      - kafka3
+    deploy:
+      replicas: 3
+      update_config:
+        parallelism: 1
+        delay: 10s
+      restart_policy:
+        condition: on-failure
+    networks:
+      - mesh-network
+      - backend-network
+
+  device-control:
+    build:
+      context: ./services/device-control
+      dockerfile: Dockerfile.golang
+    environment:
+      - MQTT_BROKER=mqtt://mosquitto:1883
+      - POSTGRES_URL=postgresql://postgres-master:5432/devices
+    depends_on:
+      - mosquitto
+      - postgres-master
+    deploy:
+      replicas: 2
+    networks:
+      - backend-network
+
+  stream-service:
+    build:
+      context: ./services/stream-management
+      dockerfile: Dockerfile.ffmpeg
+    ports:
+      - "8888:8888"
+    environment:
+      - RTMP_PORT=1935
+      - HLS_FRAGMENT_DURATION=4
+    volumes:
+      - stream-data:/var/stream
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks:
+      - stream-network
+
+  telemetry-processor:
+    build:
+      context: ./services/telemetry
+      dockerfile: Dockerfile.rust
+    environment:
+      - INFLUXDB_URL=http://influxdb:8086
+      - SPARK_MASTER=spark://spark-master:7077
+    depends_on:
+      - influxdb
+      - spark-master
+    networks:
+      - analytics-network
+
+  ml-analytics:
+    build:
+      context: ./services/ml-analytics
+      dockerfile: Dockerfile.python
+    environment:
+      - TENSORFLOW_SERVING_URL=tensorflow-serving:8501
+      - MODEL_PATH=/models/behavior
+    volumes:
+      - ml-models:/models
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+    networks:
+      - ml-network
+
+  postgres-master:
+    image: bitnami/postgresql:15
+    environment:
+      - POSTGRESQL_REPLICATION_MODE=master
+      - POSTGRESQL_REPLICATION_USER=repl_user
+      - POSTGRESQL_REPLICATION_PASSWORD=repl_password
+      - POSTGRESQL_USERNAME=postgres
+      - POSTGRESQL_PASSWORD=postgres
+      - POSTGRESQL_DATABASE=devices
+    volumes:
+      - postgres-master:/bitnami/postgresql
+    networks:
+      - database-network
+
+  postgres-slave:
+    image: bitnami/postgresql:15
+    environment:
+      - POSTGRESQL_REPLICATION_MODE=slave
+      - POSTGRESQL_REPLICATION_USER=repl_user
+      - POSTGRESQL_REPLICATION_PASSWORD=repl_password
+      - POSTGRESQL_MASTER_HOST=postgres-master
+    depends_on:
+      - postgres-master
+    networks:
+      - database-network
+
+  redis-cluster:
+    image: redis:7-alpine
+    command: redis-server /usr/local/etc/redis/redis.conf
+    volumes:
+      - ./config/redis/redis.conf:/usr/local/etc/redis/redis.conf
+    networks:
+      - cache-network
+
+  kafka1:
+    image: confluentinc/cp-kafka:7.3.0
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka1:9092
+    networks:
+      - message-network
+
+  kafka2:
+    image: confluentinc/cp-kafka:7.3.0
+    environment:
+      KAFKA_BROKER_ID: 2
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka2:9092
+    networks:
+      - message-network
+
+  kafka3:
+    image: confluentinc/cp-kafka:7.3.0
+    environment:
+      KAFKA_BROKER_ID: 3
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka3:9092
+    networks:
+      - message-network
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.3.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+    networks:
+      - message-network
+
+  influxdb:
+    image: influxdb:2.7
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=admin
+      - DOCKER_INFLUXDB_INIT_PASSWORD=adminpassword
+      - DOCKER_INFLUXDB_INIT_ORG=spider_monitoring
+      - DOCKER_INFLUXDB_INIT_BUCKET=telemetry
+    volumes:
+      - influxdb-data:/var/lib/influxdb2
+    networks:
+      - analytics-network
+
+  grafana:
+    image: grafana/grafana:9.5.0
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SERVERS_ROOT_URL=http://grafana.ahecs.local
+    volumes:
+      - grafana-data:/var/lib/grafana
+    networks:
+      - monitoring-network
+
+  prometheus:
+    image: prom/prometheus:v2.44.0
+    volumes:
+      - ./config/prometheus:/etc/prometheus
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    networks:
+      - monitoring-network
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.7.0
+    environment:
+      - node.name=es01
+      - cluster.name=es-docker-cluster
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    networks:
+      - elk-network
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.7.0
+    environment:
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+    networks:
+      - elk-network
+
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.7.0
+    volumes:
+      - ./config/logstash/pipeline:/usr/share/logstash/pipeline
+    networks:
+      - elk-network
+
+volumes:
+  postgres-master:
+  stream-data:
+  ml-models:
+  influxdb-data:
+  grafana-data:
+  prometheus-data:
+  elasticsearch-data:
+
+networks:
+  mesh-network:
+    driver: overlay
+  backend-network:
+    driver: overlay
+  stream-network:
+    driver: overlay
+  analytics-network:
+    driver: overlay
+  ml-network:
+    driver: overlay
+  database-network:
+    driver: overlay
+  cache-network:
+    driver: overlay
+  message-network:
+    driver: overlay
+  monitoring-network:
+    driver: overlay
+  elk-network:
+    driver: overlay 

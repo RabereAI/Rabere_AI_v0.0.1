@@ -1,0 +1,119 @@
+apiVersion: install.istio.io/v1alpha1
+kind: IstioOperator
+metadata:
+  namespace: istio-system
+  name: rabere-habitat-istio
+spec:
+  profile: default
+  components:
+    base:
+      enabled: true
+    pilot:
+      enabled: true
+      k8s:
+        resources:
+          requests:
+            cpu: 500m
+            memory: 2048Mi
+          limits:
+            cpu: 1000m
+            memory: 4096Mi
+    ingressGateways:
+    - name: istio-ingressgateway
+      enabled: true
+      k8s:
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 2000m
+            memory: 1024Mi
+        service:
+          type: LoadBalancer
+          ports:
+          - port: 80
+            targetPort: 8080
+            name: http2
+          - port: 443
+            targetPort: 8443
+            name: https
+    egressGateways:
+    - name: istio-egressgateway
+      enabled: true
+      k8s:
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 2000m
+            memory: 1024Mi
+  values:
+    global:
+      proxy:
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 2000m
+            memory: 1024Mi
+      useMCP: false
+    pilot:
+      autoscaleEnabled: true
+      autoscaleMin: 1
+      autoscaleMax: 5
+      replicaCount: 1
+      traceSampling: 1.0
+    gateways:
+      istio-ingressgateway:
+        autoscaleEnabled: true
+        autoscaleMin: 1
+        autoscaleMax: 5
+      istio-egressgateway:
+        autoscaleEnabled: true
+        autoscaleMin: 1
+        autoscaleMax: 5
+    sidecarInjectorWebhook:
+      rewriteAppHTTPProbe: true
+    prometheus:
+      enabled: true
+    grafana:
+      enabled: true
+    kiali:
+      enabled: true
+    tracing:
+      enabled: true
+      provider: jaeger
+    security:
+      enabled: true
+      selfSigned: true
+      createMeshPolicy: true
+    telemetry:
+      enabled: true
+      v1:
+        enabled: false
+      v2:
+        enabled: true
+        prometheus:
+          enabled: true
+        stackdriver:
+          enabled: false
+    meshConfig:
+      enableTracing: true
+      defaultConfig:
+        tracing:
+          sampling: 100
+          zipkin:
+            address: zipkin.istio-system:9411
+      accessLogFile: /dev/stdout
+      enableEnvoyAccessLogService: true
+      outboundTrafficPolicy:
+        mode: ALLOW_ANY
+      defaultServiceExportTo:
+      - "*"
+      defaultVirtualServiceExportTo:
+      - "*"
+      defaultDestinationRuleExportTo:
+      - "*" 

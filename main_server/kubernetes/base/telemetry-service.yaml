@@ -1,0 +1,245 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: telemetry-config
+  namespace: rabere-habitat
+data:
+  telemetry.toml: |
+    [service]
+    name = "telemetry-service"
+    environment = "production"
+    log_level = "info"
+
+    [metrics]
+    enabled = true
+    port = 9090
+    path = "/metrics"
+
+    [storage]
+    type = "influxdb"
+    retention_days = 90
+    batch_size = 1000
+    flush_interval = "10s"
+
+    [processing]
+    window_size = "5m"
+    overlap = "30s"
+    aggregation_interval = "1m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: telemetry-service
+  namespace: rabere-habitat
+  labels:
+    app: telemetry-service
+    component: processing
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9090"
+spec:
+  type: ClusterIP
+  ports:
+    - port: 9090
+      targetPort: metrics
+      protocol: TCP
+      name: metrics
+    - port: 8080
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app: telemetry-service
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: telemetry-service
+  namespace: rabere-habitat
+  labels:
+    app: telemetry-service
+spec:
+  serviceName: telemetry-service
+  replicas: 3
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: telemetry-service
+  template:
+    metadata:
+      labels:
+        app: telemetry-service
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+    spec:
+      serviceAccountName: telemetry-service-sa
+      securityContext:
+        fsGroup: 1000
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: telemetry-service
+          image: ahecs/telemetry-service:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: INFLUXDB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: telemetry-secrets
+                  key: influxdb-url
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"
+          volumeMounts:
+            - name: config
+              mountPath: /etc/telemetry
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/telemetry
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: metrics
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          startupProbe:
+            httpGet:
+              path: /startup
+              port: metrics
+            failureThreshold: 30
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: telemetry-config
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: "ebs-sc"
+        resources:
+          requests:
+            storage: 10Gi
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: telemetry-service-pdb
+  namespace: rabere-habitat
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: telemetry-service
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: telemetry-service
+  namespace: rabere-habitat
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: telemetry-service
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: telemetry-service-network-policy
+  namespace: rabere-habitat
+spec:
+  podSelector:
+    matchLabels:
+      app: telemetry-service
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: api-gateway
+        - podSelector:
+            matchLabels:
+              app: device-control
+      ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 9090
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: influxdb
+      ports:
+        - protocol: TCP
+          port: 8086
+    - to:
+        - podSelector:
+            matchLabels:
+              app: kafka
+      ports:
+        - protocol: TCP
+          port: 9092 

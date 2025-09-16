@@ -1,0 +1,21 @@
+main_server/
+├── services/
+│   ├── gateway/
+│   ├── device-control/
+│   ├── stream-management/
+│   ├── user-management/
+│   ├── telemetry/
+│   └── notification/
+├── shared/
+│   ├── models/
+│   ├── interfaces/
+│   ├── constants/
+│   └── utils/
+├── infrastructure/
+│   ├── kubernetes/
+│   ├── docker/
+│   └── terraform/
+└── documentation/
+    ├── api/
+    ├── architecture/
+    └── deployment/ 

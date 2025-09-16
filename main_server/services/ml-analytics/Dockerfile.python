@@ -1,0 +1,86 @@
+# Stage 1: Base image with CUDA support
+FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04 AS base
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    python3.11 \
+    python3.11-dev \
+    python3-pip \
+    libpq-dev \
+    ffmpeg \
+    libsm6 \
+    libxext6 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Stage 2: Builder
+FROM base AS builder
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set up virtual environment
+RUN python3.11 -m pip install --no-cache-dir virtualenv
+ENV VIRTUAL_ENV=/opt/venv
+RUN virtualenv $VIRTUAL_ENV -p python3.11
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Stage 3: Security scanner
+FROM aquasec/trivy:latest AS security-scan
+WORKDIR /scan
+COPY . .
+RUN trivy filesystem --no-progress --ignore-unfixed --severity HIGH,CRITICAL .
+
+# Stage 4: Runtime
+FROM base AS runtime
+
+# Create non-root user
+RUN groupadd -r mlservice && useradd -r -g mlservice mlservice
+
+# Copy virtual environment from builder
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Set up working directory
+WORKDIR /app
+
+# Copy application code and models
+COPY --chown=mlservice:mlservice . .
+COPY --chown=mlservice:mlservice models /models
+
+# Set up model serving configuration
+ENV MODEL_PATH=/models \
+    TENSORFLOW_SERVING_PORT=8501 \
+    METRICS_PORT=9090 \
+    PYTHONUNBUFFERED=1 \
+    CUDA_VISIBLE_DEVICES=0
+
+# Create necessary directories
+RUN mkdir -p /app/logs /app/data \
+    && chown -R mlservice:mlservice /app /models
+
+# Set up healthcheck
+HEALTHCHECK --interval=30s --timeout=3s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:${METRICS_PORT}/health || exit 1
+
+# Switch to non-root user
+USER mlservice
+
+# Expose ports
+EXPOSE ${TENSORFLOW_SERVING_PORT} ${METRICS_PORT}
+
+# Start application with monitoring
+CMD ["python", "-m", "ml_analytics.main"]
+
+# Labels
+LABEL maintainer="AHECS Team <team@ahecs.io>" \
+      version="1.0.0" \
+      description="ML Analytics Service for Spider Behavior Analysis" \
+      org.opencontainers.image.source="https://github.com/ahecs/ml-analytics" \
+      org.opencontainers.image.licenses="Proprietary" 
